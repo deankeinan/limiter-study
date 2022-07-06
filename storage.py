@@ -343,14 +343,13 @@ class RedisFixedWindowCounter:
         self.hash_name = keyspace
 
     def consume(self, key, rate: RequestRate):
-
         now = datetime.now()
         latest_window = floor_dt(now, rate.period)
         if redis_client.hexists(self.hash_name,key):
             val = redis_client.hget(self.hash_name,key).decode()
             count, active_window = val.split('##')
-            active_window = datetime.fromtimestamp(int(float(active_window)))
             count = int(count)
+            active_window = datetime.fromtimestamp(int(float(active_window)))
             if active_window < latest_window:
                 redis_client.hset(self.hash_name,key,f"0##{latest_window.timestamp()}")
                 return True, rate.requests, latest_window + rate.period
