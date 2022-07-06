@@ -3,7 +3,14 @@ from datetime import datetime, timedelta
 from functools import wraps
 from tkinter import N
 from typing import Callable
-from flask import Flask, jsonify, Request, request
+from flask import (
+    Flask,
+    jsonify,
+    Request,
+    render_template,
+    render_template_string,
+    request,
+)
 from rich import inspect
 from functools import wraps
 from typing import Callable
@@ -13,158 +20,69 @@ from flask import Response
 from rich import inspect
 
 from storage import (
-    LeakyBucket,
     LocalFixedWindowCounter,
     LocalLeakyBucket,
+    LocalSlidingLog,
     LocalTokenBucket,
-    TokenBucket,
-    WindowCounter,
 )
-
-
-def fixed_window_limiter(
-    backend: WindowCounter, identifier_func: Callable, rate=2
-):
-    """
-    Decorator that limits usage of the decorated function using a Fixed Window.
-
-    Args:
-        backend (FixedWindowCounter): a FixedWindow storage backend
-        identifier_func (Callable): some function that discriminates each request
-        rate (float): refill rate in tokens per second
-
-    Returns:
-        A 429 message if the rate limit is exceeded, the result of the decorated function otherwise.
-    """
-
-    def decorator(f):
-        @wraps(f)
-        def wrapper(*args, **kwargs):
-            key = identifier_func()
-            allow, remaining, next_reset = backend.consume(key, rate)
-            rate_headers = {
-                "api-ratelimit-limit": rate,
-                "api-ratelimit-remaining": remaining,
-                "api-ratelimit-reset": next_reset,
-            }
-            if allow:
-                resp = f(*args, **kwargs)
-                return Response(response=resp, status=200, headers=rate_headers)
-            else:
-                return Response(
-                    response=f"Rate Limit for {key} exceeded.",
-                    status=429,
-                    headers=rate_headers,
-                )
-
-        return wrapper
-
-    return decorator
-
-
-def token_bucket_limiter(
-    backend: TokenBucket, identifier_func: Callable, rate=1, capacity=6, cost=1
-):
-    """
-    Decorator that limits usage of the decorated function using a Token Bucket.
-
-    Args:
-        backend (TokenBucket): a TokenBucket storage backend
-        identifier_func (Callable): some function that discriminates each request
-        rate (float): refill rate in tokens per second
-        capacity (int): maximum token amount per identifier
-        cost (int): the token cost of the decorated function
-
-    Returns:
-        A 429 message if the rate limit is exceeded, the result of the decorated function otherwise.
-    """
-
-    def decorator(f):
-        @wraps(f)
-        def wrapper(*args, **kwargs):
-            key = identifier_func()
-            backend.refill(key, rate, capacity)
-            allow, tokens, last_refill = backend.consume(key, cost)
-            rate_headers = {
-                "api-ratelimit-limit": rate,
-                "api-ratelimit-remaining": tokens / cost,
-            }
-
-            if allow:
-                resp = f(*args, **kwargs)
-                return Response(response=resp, status=200, headers=rate_headers)
-            else:
-                return Response(
-                    response=f"Rate Limit for {key} exceeded.",
-                    status=429,
-                    headers=rate_headers,
-                )
-
-        return wrapper
-
-    return decorator
-
-
-def leaky_bucket_limiter(
-    backend: LeakyBucket, identifier_func: Callable, rate=1, capacity=6, cost=1
-):
-    """
-    Decorator that limits usage of the decorated function using a Leaky Bucket (as a meter).
-
-    Args:
-        backend (LocalLeakyBucket): a storage backend
-        identifier_func (Callable): some function that discriminates each request
-        rate (float): leak rate in tokens per second
-        capacity (int): maximum token amount per identifier
-        cost (int): the token cost of the decorated function
-
-    Returns:
-        A 429 message if the rate limit is exceeded, the result of the decorated function otherwise.
-    """
-
-    def decorator(f):
-        @wraps(f)
-        def wrapper(*args, **kwargs):
-            key = identifier_func()
-            backend.leak(key, rate)
-            allow, tokens, last_leak = backend.pour(key, capacity, cost)
-            print(allow, tokens, last_leak)
-            rate_headers = {
-                "api-ratelimit-limit": rate,
-                "api-ratelimit-remaining": (capacity - tokens) / cost,
-            }
-
-            if allow:
-                resp = f(*args, **kwargs)
-                return Response(response=resp, status=200, headers=rate_headers)
-            else:
-                return Response(
-                    response=f"Rate Limit for {key} exceeded.",
-                    status=429,
-                    headers=rate_headers,
-                )
-
-        return wrapper
-
-    return decorator
 
 
 def identify_by_client_ip():
     return request.remote_addr
 
+def identify_by_api_key():
+    return request.headers['api-key']
 
 app = Flask(__name__)
+
 
 local_tb = LocalTokenBucket()
 local_lb = LocalLeakyBucket()
 local_fw = LocalFixedWindowCounter()
+local_sl = LocalSlidingLog()
 
-
+# Intended rate limit for all limiters is 6 reqs/min
 @app.route("/")
-# @token_bucket_limiter(backend=local_tb,identifier_func=identify_by_client_ip,rate=0.5,capacity=10)
-@leaky_bucket_limiter(
-    backend=local_lb, identifier_func=identify_by_client_ip, rate=0.5, capacity=6
-)
-# @fixed_window_limiter(backend=local_fw,identifier_func=identify_by_client_ip,rate=2)
 def hello_world():
-    return "Hello, World!"
+    return render_template_string(
+        """
+        <html>
+
+            <body>
+                <h1>Hello World!</h1>
+                <h2>intended rate limit for all limiters is 6reqs/min</h2>
+                <ul>
+                    <li><a href="/local/tb">Local_TokenBucket</a></li>
+                    <li><a href="/local/lb">Local_LeakyBucket</a></li>
+                    <li><a href="/local/fw">Local_FixedWindowCount</a></li>
+                    <li><a href="/local/swl">Local_SlidingWindowLog</a></li>
+                </ul>
+            </body>
+
+        </html>
+        """
+    )
+
+
+@app.route("/local/tb")
+@local_tb(identifier_func=identify_by_api_key, rate=0.1, capacity=6)
+def hello_local_tb():
+    return "Hello! I'm rate limited by an in-memory TokenBucket algo"
+
+
+@app.route("/local/lb")
+@local_lb(identifier_func=identify_by_api_key, rate=0.1, capacity=6)
+def hello_local_lb():
+    return "Hello! I'm rate limited by an in-memory LeakyBucket algo"
+
+
+@app.route("/local/fw")
+@local_fw(identifier_func=identify_by_api_key, rate=6)
+def hello_local_fw():
+    return "Hello! I'm rate limited by an in-memory FixedWindowCounter algo"
+
+
+@app.route("/local/swl")
+@local_sl(identifier_func=identify_by_api_key, rate=6)
+def hello_local_sl():
+    return "Hello! I'm rate limited by an in-memory Sliding Window Log algo"
